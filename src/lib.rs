@@ -135,6 +135,12 @@ impl Client {
     {
         Connection::new(&self.initial_nodes, self.retries).await
     }
+
+    pub async fn get_slot_map(&self) -> RedisResult<SlotMap> {
+        Pipeline::<redis::aio::MultiplexedConnection>::new(&self.initial_nodes, self.retries)
+            .await
+            .map(|connection| connection.slots)
+    }
 }
 
 /// This is a connection of Redis cluster.
@@ -159,7 +165,7 @@ where
     }
 }
 
-type SlotMap = BTreeMap<u16, String>;
+pub type SlotMap = BTreeMap<u16, String>;
 
 struct Pipeline<C> {
     connections: HashMap<String, C>,
@@ -531,10 +537,10 @@ where
     }
 
     fn get_connection(&self, slot: u16) -> impl Future<Output = (String, C)> + 'static {
-        if let Some((_, addr)) = self.slots.range(&slot..).next() {
+        if let Some(addr) = self.slots.addr_for_slot(slot) {
             if self.connections.contains_key(addr) {
                 return future::Either::Left(future::ready((
-                    addr.clone(),
+                    addr.to_owned(),
                     self.connections.get(addr).unwrap().clone(),
                 )));
             }
@@ -542,7 +548,7 @@ where
             // Create new connection.
             //
             let random_conn = get_random_connection(&self.connections, None); // TODO Only do this lookup if the first check fails
-            let addr = addr.clone();
+            let addr = addr.to_owned();
             future::Either::Right(async move {
                 let result = connect_and_check(addr.as_ref()).await;
                 result
@@ -858,9 +864,23 @@ where
     (addr.to_string(), connections.get(addr).unwrap().clone())
 }
 
-fn slot_for_key(key: &[u8]) -> u16 {
+pub fn slot_for_key(key: &[u8]) -> u16 {
     let key = sub_key(&key);
     State::<XMODEM>::calculate(&key) % SLOT_SIZE as u16
+}
+
+pub trait BTreeMapExt {
+    fn addr_for_slot(&self, slot: u16) -> Option<&str>;
+
+    fn addr_for_key(&self, key: &[u8]) -> Option<&str> {
+        self.addr_for_slot(slot_for_key(key))
+    }
+}
+
+impl BTreeMapExt for SlotMap {
+    fn addr_for_slot(&self, slot: u16) -> Option<&str> {
+        self.range(&slot..).next().map(|(_, addr)| addr.as_str())
+    }
 }
 
 // If a key contains `{` and `}`, everything between the first occurence is the only thing that
